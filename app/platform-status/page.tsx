@@ -54,6 +54,12 @@ export default function PlatformStatusPage() {
               not a real-time uptime monitor or a blanket production certification.
               Restricted operational architecture is intentionally excluded.
             </p>
+            <p className="mt-4 max-w-3xl text-sm leading-7 text-muted-foreground">
+              Platform development continues during controlled public beta. Wider access
+              has no confirmed restoration date and will be announced through official
+              channels after the required reviews. This notice is informational; it does
+              not verify account ownership, request a transaction, or restore access.
+            </p>
             <p className="mt-4 text-sm text-muted-foreground">
               Last verified: November 12, 2026 (West Africa Time)
             </p>
@@ -85,9 +91,9 @@ export default function PlatformStatusPage() {
                 <Link href="/beta-access" className="font-medium text-accent hover:underline">
                   Beta access
                 </Link>
-                <Link href="/support" className="font-medium text-accent hover:underline">
-                  Support
-                </Link>
+                <a href="mailto:support@deltaalpha-trade-pro.com?subject=Platform%20Status%20Enquiry" className="font-medium text-accent hover:underline">
+                  Contact support by email
+                </a>
               </div>
             </div>
           </div>
