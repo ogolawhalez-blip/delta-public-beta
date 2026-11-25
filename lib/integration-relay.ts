@@ -209,6 +209,49 @@ export async function relayEvent(event: RelayEvent) {
     }
   }
 
+  if (event.source === "meta" || event.source === "whatsapp") {
+    const target = trim(process.env.WHALEZ_META_SUPPORT_INGEST_URL)
+    const token = trim(process.env.WHALEZ_META_SUPPORT_RELAY_TOKEN)
+    const expected = event.externalId || ""
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown> : {}
+    const valid = event.source === "meta" && event.verified === true
+      && /^[a-f0-9]{64}$/.test(expected)
+      && ["whatsapp_business_account", "page", "instagram", "webhook"].includes(event.event)
+      && Object.keys(payload).length === 1 && payload.kind === event.event
+    let validTarget = false
+    try {
+      const parsed = new URL(target)
+      const localOnly = process.env.NODE_ENV !== "production" && parsed.protocol === "http:"
+        && ["127.0.0.1", "localhost"].includes(parsed.hostname)
+      validTarget = (parsed.protocol === "https:" || localOnly)
+        && parsed.pathname === "/api/integrations/meta"
+        && !parsed.username && !parsed.password && !parsed.search && !parsed.hash
+    } catch {
+      validTarget = false
+    }
+    const failure = { forwarded: false as const, duplicate: false, targets: [] }
+    if (!valid || !validTarget || token.length < 32 || token.length > 256) return failure
+    try {
+      const response = await fetch(target, {
+        method: "POST", redirect: "error", cache: "no-store",
+        signal: AbortSignal.timeout(7000),
+        headers: { "content-type": "application/json", "x-whalez-internal-token": token },
+        body: JSON.stringify({
+          source: "meta", event: event.event, externalId: expected, receivedAt: event.receivedAt,
+          verified: true, payload: { kind: event.event }, meta: {},
+        }),
+      })
+      const receipt: unknown = await response.json().catch(() => null)
+      const record = receipt && typeof receipt === "object" ? receipt as Record<string, unknown> : {}
+      const stored = response.ok && record.accepted === true && record.stored === true
+        && record.source === "meta" && record.externalId === expected
+      return { forwarded: stored, duplicate: stored && record.duplicate === true, targets: [] }
+    } catch {
+      return failure
+    }
+  }
+
   const targets: RelayTarget[] = []
   const mailIngestUrl = trim(process.env.WHALEZ_MAIL_INGEST_URL)
   const controlRelayUrl = trim(process.env.WHALEZ_CONTROL_EVENT_URL)

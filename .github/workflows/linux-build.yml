@@ -28,6 +28,6 @@ jobs:
       - name: Audit locked dependencies
         run: npm audit --audit-level=low
       - name: Regression tests
-        run: node --import tsx --test tests/market-news.test.ts tests/payments/telegram-durable-relay.test.ts tests/payments/telegram-public-bot.test.ts tests/security/public-gateway-boundaries.test.ts
+        run: node --import tsx --test tests/market-news.test.ts tests/payments/telegram-durable-relay.test.ts tests/payments/meta-durable-relay.test.ts tests/payments/telegram-public-bot.test.ts tests/security/public-gateway-boundaries.test.ts
       - name: Build
         run: npm run build
