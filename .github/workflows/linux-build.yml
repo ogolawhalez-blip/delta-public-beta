@@ -10,6 +10,9 @@ concurrency:
   group: linux-build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Linux Build / build
@@ -21,6 +24,10 @@ jobs:
           node-version: 20
           cache: npm
       - name: Install
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+      - name: Audit locked dependencies
+        run: npm audit --audit-level=low
+      - name: Regression tests
+        run: node --import tsx --test tests/market-news.test.ts tests/payments/telegram-durable-relay.test.ts tests/payments/telegram-public-bot.test.ts tests/security/public-gateway-boundaries.test.ts
       - name: Build
         run: npm run build
