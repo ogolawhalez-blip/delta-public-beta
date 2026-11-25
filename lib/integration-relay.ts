@@ -1,0 +1,311 @@
+import crypto from "node:crypto"
+
+type RelaySource = "tidio" | "telegram" | "meta" | "whatsapp"
+
+type RelayEvent = {
+  source: RelaySource
+  event: string
+  externalId?: string
+  receivedAt: string
+  verified: boolean
+  payload: unknown
+  meta?: Record<string, unknown>
+}
+
+type RelayTarget = {
+  name: string
+  url: string
+}
+
+const trim = (value: string | undefined | null) => value?.trim() ?? ""
+
+const truthy = (value: string | undefined | null) => Boolean(trim(value))
+
+function safeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left)
+  const rightBuffer = Buffer.from(right)
+
+  if (leftBuffer.length !== rightBuffer.length) return false
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer)
+}
+
+function parseHeaderPairs(header: string): Record<string, string[]> {
+  return header.split(",").reduce<Record<string, string[]>>((acc, chunk) => {
+    const [rawKey, ...rest] = chunk.trim().split("=")
+    const key = rawKey.trim()
+    const value = rest.join("=").trim()
+    if (!key || !value) return acc
+    if (!acc[key]) acc[key] = []
+    acc[key].push(value)
+    return acc
+  }, {})
+}
+
+export function getIntegrationStatus() {
+  const tidioPublicKey = trim(process.env.NEXT_PUBLIC_TIDIO_PUBLIC_KEY)
+  const tidioWebhookSecret = trim(process.env.TIDIO_WEBHOOK_SECRET)
+  const telegramChannelUrl = trim(process.env.NEXT_PUBLIC_TELEGRAM_CHANNEL_URL) || "https://t.me/whalez_ai_deltaalpha_trade_pro"
+  const telegramSecretToken = trim(process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN)
+  const whatsappNumber = trim(process.env.NEXT_PUBLIC_WHATSAPP_NUMBER).replace(/\D/g, "")
+  const facebookUrl = trim(process.env.NEXT_PUBLIC_FACEBOOK_PAGE_URL)
+  const instagramUrl = trim(process.env.NEXT_PUBLIC_INSTAGRAM_URL)
+  const metaPixelId = trim(process.env.NEXT_PUBLIC_META_PIXEL_ID)
+  const metaWebhookVerifyToken = trim(process.env.META_WEBHOOK_VERIFY_TOKEN)
+  const metaAppSecret = trim(process.env.META_APP_SECRET)
+  const mailIngestUrl = trim(process.env.WHALEZ_MAIL_INGEST_URL)
+  const controlRelayUrl = trim(process.env.WHALEZ_CONTROL_EVENT_URL)
+  const internalRelayToken = trim(process.env.WHALEZ_INTERNAL_RELAY_TOKEN)
+
+  return {
+    service: "delta-public-beta",
+    status: "ok",
+    configured: {
+      tidioWidget: truthy(tidioPublicKey),
+      tidioWebhook: truthy(tidioWebhookSecret),
+      telegramChannel: truthy(telegramChannelUrl),
+      telegramWebhook: truthy(telegramSecretToken),
+      whatsapp: truthy(whatsappNumber),
+      metaPixel: truthy(metaPixelId),
+      metaWebhook: truthy(metaWebhookVerifyToken) || truthy(metaAppSecret),
+      facebook: truthy(facebookUrl),
+      instagram: truthy(instagramUrl),
+      mailRelay: truthy(mailIngestUrl),
+      controlRelay: truthy(controlRelayUrl),
+      internalRelayToken: truthy(internalRelayToken),
+    },
+    routes: {
+      status: "/api/status",
+      tidioWebhook: "/api/webhooks/tidio",
+      telegramWebhook: "/api/webhooks/telegram",
+      metaWebhook: "/api/webhooks/meta",
+      whatsappWebhook: "/api/webhooks/whatsapp",
+    },
+    publicLinks: {
+      telegramChannelUrl,
+      whatsappUrl: whatsappNumber ? `https://wa.me/${whatsappNumber}` : "https://wa.me/",
+      facebookUrl,
+      instagramUrl,
+      mailSurfaceUrl: process.env.NEXT_PUBLIC_WHALEZ_MAIL_URL?.trim() || "/mail",
+    },
+  }
+}
+
+export function verifyTidioWebhook(rawBody: string, signatureHeader: string | null, secret: string) {
+  if (!signatureHeader) {
+    return { verified: false, reason: "missing_signature" as const }
+  }
+
+  const parts = parseHeaderPairs(signatureHeader)
+  const timestamp = parts.t?.[0] ?? ""
+  const signatures = parts.s ?? []
+
+  if (!timestamp || signatures.length === 0) {
+    return { verified: false, reason: "malformed_signature" as const }
+  }
+
+  const expected = crypto.createHmac("sha256", secret).update(`${rawBody}_${timestamp}`).digest("hex")
+  const verified = signatures.some((candidate) => safeEqual(candidate, expected))
+
+  return verified
+    ? { verified: true as const, timestamp, signatureCount: signatures.length }
+    : { verified: false as const, reason: "signature_mismatch" as const, timestamp, signatureCount: signatures.length }
+}
+
+export function verifyTelegramWebhook(secret: string, headerToken: string | null) {
+  if (!secret) {
+    return { verified: false as const, reason: "secret_not_configured" as const }
+  }
+
+  if (!headerToken) {
+    return { verified: false as const, reason: "missing_secret_token" as const }
+  }
+
+  return safeEqual(headerToken, secret)
+    ? { verified: true as const }
+    : { verified: false as const, reason: "secret_token_mismatch" as const }
+}
+
+export function verifyMetaWebhook(rawBody: string, signatureHeader: string | null, appSecret: string) {
+  if (!signatureHeader) {
+    return { verified: false as const, reason: "missing_signature" as const }
+  }
+
+  const [prefix, signature] = signatureHeader.split("=")
+  if (prefix !== "sha256" || !signature) {
+    return { verified: false as const, reason: "malformed_signature" as const }
+  }
+
+  const expected = crypto.createHmac("sha256", appSecret).update(rawBody).digest("hex")
+  return safeEqual(signature, expected)
+    ? { verified: true as const }
+    : { verified: false as const, reason: "signature_mismatch" as const }
+}
+
+export async function relayEvent(event: RelayEvent) {
+  // Telegram support updates are metadata-only and must reach the dedicated
+  // Whalez-Mail durable intake before the webhook acknowledges delivery.
+  // The general Tidio ingress expects a different signed provider contract.
+  if (event.source === "telegram") {
+    const target = trim(process.env.WHALEZ_TELEGRAM_SUPPORT_INGEST_URL)
+    const token = trim(process.env.WHALEZ_TELEGRAM_SUPPORT_RELAY_TOKEN)
+    const expected = event.externalId || ""
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown> : {}
+    const validPayload = event.verified === true
+      && /^\d{1,20}$/.test(expected)
+      && (event.event === "message" || event.event === "update")
+      && Object.keys(payload).length === 2
+      && payload.update_id === expected
+      && payload.kind === event.event
+
+    let validTarget = false
+    try {
+      const parsed = new URL(target)
+      const localOnly = process.env.NODE_ENV !== "production"
+        && parsed.protocol === "http:"
+        && ["127.0.0.1", "localhost"].includes(parsed.hostname)
+      validTarget = (parsed.protocol === "https:" || localOnly)
+        && parsed.pathname === "/api/integrations/telegram"
+        && !parsed.username && !parsed.password && !parsed.search && !parsed.hash
+    } catch {
+      validTarget = false
+    }
+
+    if (!validPayload) {
+      return { forwarded: false as const, reason: "telegram_envelope_invalid" as const,
+        targets: [{ name: "whalez-mail-telegram", status: "rejected" as const }] }
+    }
+    if (!validTarget || token.length < 32 || token.length > 256) {
+      return { forwarded: false as const, reason: "telegram_support_not_configured" as const,
+        targets: [{ name: "whalez-mail-telegram", status: "not-configured" as const }] }
+    }
+
+    try {
+      const response = await fetch(target, {
+        method: "POST",
+        redirect: "error",
+        cache: "no-store",
+        signal: AbortSignal.timeout(7000),
+        headers: {
+          "content-type": "application/json",
+          "x-whalez-internal-token": token,
+        },
+        body: JSON.stringify({ ...event, payload: { update_id: expected, kind: event.event }, meta: {} }),
+      })
+      const receipt: unknown = await response.json().catch(() => null)
+      const record = receipt && typeof receipt === "object" ? receipt as Record<string, unknown> : {}
+      const stored = response.ok && record.accepted === true && record.stored === true
+        && record.source === "telegram" && record.externalId === expected
+      return { forwarded: stored, duplicate: record.duplicate === true, targets: [{
+        name: "whalez-mail-telegram",
+        status: stored ? ("forwarded" as const) : ("failed" as const),
+        httpStatus: response.status,
+      }] }
+    } catch {
+      return { forwarded: false as const, targets: [{
+        name: "whalez-mail-telegram", status: "failed" as const,
+        error: "telegram_support_relay_unavailable" as const,
+      }] }
+    }
+  }
+
+  if (event.source === "meta" || event.source === "whatsapp") {
+    const target = trim(process.env.WHALEZ_META_SUPPORT_INGEST_URL)
+    const token = trim(process.env.WHALEZ_META_SUPPORT_RELAY_TOKEN)
+    const expected = event.externalId || ""
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown> : {}
+    const valid = event.source === "meta" && event.verified === true
+      && /^[a-f0-9]{64}$/.test(expected)
+      && ["whatsapp_business_account", "page", "instagram", "webhook"].includes(event.event)
+      && Object.keys(payload).length === 1 && payload.kind === event.event
+    let validTarget = false
+    try {
+      const parsed = new URL(target)
+      const localOnly = process.env.NODE_ENV !== "production" && parsed.protocol === "http:"
+        && ["127.0.0.1", "localhost"].includes(parsed.hostname)
+      validTarget = (parsed.protocol === "https:" || localOnly)
+        && parsed.pathname === "/api/integrations/meta"
+        && !parsed.username && !parsed.password && !parsed.search && !parsed.hash
+    } catch {
+      validTarget = false
+    }
+    const failure = { forwarded: false as const, duplicate: false, targets: [] }
+    if (!valid || !validTarget || token.length < 32 || token.length > 256) return failure
+    try {
+      const response = await fetch(target, {
+        method: "POST", redirect: "error", cache: "no-store",
+        signal: AbortSignal.timeout(7000),
+        headers: { "content-type": "application/json", "x-whalez-internal-token": token },
+        body: JSON.stringify({
+          source: "meta", event: event.event, externalId: expected, receivedAt: event.receivedAt,
+          verified: true, payload: { kind: event.event }, meta: {},
+        }),
+      })
+      const receipt: unknown = await response.json().catch(() => null)
+      const record = receipt && typeof receipt === "object" ? receipt as Record<string, unknown> : {}
+      const stored = response.ok && record.accepted === true && record.stored === true
+        && record.source === "meta" && record.externalId === expected
+      return { forwarded: stored, duplicate: stored && record.duplicate === true, targets: [] }
+    } catch {
+      return failure
+    }
+  }
+
+  const targets: RelayTarget[] = []
+  const mailIngestUrl = trim(process.env.WHALEZ_MAIL_INGEST_URL)
+  const controlRelayUrl = trim(process.env.WHALEZ_CONTROL_EVENT_URL)
+  const internalRelayToken = trim(process.env.WHALEZ_INTERNAL_RELAY_TOKEN)
+
+  if (mailIngestUrl) targets.push({ name: "whalez-mail", url: mailIngestUrl })
+  if (controlRelayUrl) targets.push({ name: "control-plane", url: controlRelayUrl })
+
+  if (targets.length === 0) {
+    return { forwarded: false as const, targets: [] as Array<{ name: string; status: "not-configured" }> }
+  }
+
+  const results = await Promise.allSettled(
+    targets.map(async (target) => {
+      const response = await fetch(target.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(internalRelayToken ? { "x-whalez-internal-token": internalRelayToken } : {}),
+        },
+        body: JSON.stringify(event),
+      })
+
+      return {
+        name: target.name,
+        status: response.ok ? ("forwarded" as const) : ("failed" as const),
+        httpStatus: response.status,
+      }
+    }),
+  )
+
+  return {
+    forwarded: true as const,
+    targets: results.map((result, index) => {
+      if (result.status === "fulfilled") return result.value
+      return {
+        name: targets[index]?.name ?? `target-${index + 1}`,
+        status: "failed" as const,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      }
+    }),
+  }
+}
+
+export function buildRelayEvent(params: {
+  source: RelaySource
+  event: string
+  payload: unknown
+  verified: boolean
+  externalId?: string
+  meta?: Record<string, unknown>
+}): RelayEvent {
+  return {
+    ...params,
+    receivedAt: new Date().toISOString(),
+  }
+}

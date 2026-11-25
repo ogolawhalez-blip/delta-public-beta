@@ -1,0 +1,144 @@
+import { NextResponse } from "next/server"
+import { parseRssItems } from "./rss"
+
+export const runtime = "nodejs"
+export const revalidate = 120
+
+type NewsCategory = "crypto" | "fx" | "macro" | "platform"
+type NewsItem = {
+  id: string
+  title: string
+  url: string
+  source: string
+  publishedAt: string
+  category: NewsCategory
+  summary?: string
+}
+
+const RSS_FEEDS: Record<Exclude<NewsCategory, "platform">, string> = {
+  crypto: "https://news.google.com/rss/search?q=%28bitcoin%20OR%20ethereum%20OR%20cryptocurrency%29%20market&hl=en-US&gl=US&ceid=US:en",
+  fx: "https://news.google.com/rss/search?q=%28forex%20OR%20foreign%20exchange%20OR%20USD%20NGN%29%20market&hl=en-US&gl=US&ceid=US:en",
+  macro: "https://news.google.com/rss/search?q=%28global%20markets%20OR%20central%20bank%20OR%20inflation%20OR%20oil%29%20economy&hl=en-US&gl=US&ceid=US:en",
+}
+
+const CATEGORIES: NewsCategory[] = ["crypto", "fx", "macro", "platform"]
+
+async function fetchRss(category: Exclude<NewsCategory, "platform">): Promise<NewsItem[]> {
+  const response = await fetch(RSS_FEEDS[category], {
+    headers: {
+      Accept: "application/rss+xml, application/xml, text/xml",
+      "User-Agent": "Whalez-AI-MarketBrief/1.0 (+https://www.deltaalpha-trade-pro.com)",
+    },
+    next: { revalidate: 120 },
+    signal: AbortSignal.timeout(7000),
+  })
+  if (!response.ok) throw new Error("news_feed_http_" + response.status)
+  return parseRssItems(await response.text(), category)
+}
+
+async function fetchPlatformReleases(): Promise<NewsItem[]> {
+  const repositories = ["deltaalpha-trade-pro/delta-public-beta", "deltaalpha-trade-pro/whalez-ai-core"]
+  const results = await Promise.allSettled(repositories.map(async (repository) => {
+    const response = await fetch("https://api.github.com/repos/" + repository + "/releases?per_page=5", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "Whalez-AI-MarketBrief",
+      },
+      next: { revalidate: 300 },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!response.ok) throw new Error("release_feed_http_" + response.status)
+    const releases: unknown = await response.json()
+    if (!Array.isArray(releases)) return []
+    return releases.flatMap((release: unknown) => {
+      if (!release || typeof release !== "object") return []
+      const item = release as Record<string, unknown>
+      const title = String(item.name || item.tag_name || "").trim()
+      const url = String(item.html_url || "").trim()
+      const published = Date.parse(String(item.published_at || ""))
+      if (!title || !Number.isFinite(published)) return []
+      try {
+        const parsed = new URL(url)
+        if (parsed.hostname !== "github.com" || parsed.protocol !== "https:") return []
+        return [{
+          id: "platform:" + parsed.href,
+          title,
+          url: parsed.href,
+          source: repository,
+          publishedAt: new Date(published).toISOString(),
+          category: "platform" as const,
+          summary: String(item.body || "").replace(/[#*_>]/g, "").replace(/\s+/g, " ").trim().slice(0, 220),
+        }]
+      } catch { return [] }
+    })
+  }))
+  return results.flatMap((result) => result.status === "fulfilled" ? result.value : [])
+}
+
+function categoryOf(value: string | null): NewsCategory | "all" {
+  return value && CATEGORIES.includes(value as NewsCategory) ? value as NewsCategory : "all"
+}
+
+export async function GET(request: Request) {
+  const category = categoryOf(new URL(request.url).searchParams.get("category"))
+  const jobs = category === "platform"
+    ? [fetchPlatformReleases()]
+    : category === "all"
+      ? [fetchRss("crypto"), fetchRss("fx"), fetchRss("macro"), fetchPlatformReleases()]
+      : [fetchRss(category)]
+
+  const results = await Promise.allSettled(jobs)
+  const items = results
+    .flatMap((result) => result.status === "fulfilled" ? result.value : [])
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
+  const seen = new Set<string>()
+  const unique = items.filter((item) => {
+    const key = item.url || item.title
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+
+  // A global timestamp sort alone can let one fast-moving feed crowd every
+  // other category out of the "all" view. Rotate across available categories.
+  let selected: NewsItem[]
+  if (category === "all") {
+    const queues = new Map<NewsCategory, NewsItem[]>(
+      CATEGORIES.map((key) => [key, unique.filter((item) => item.category === key)]),
+    )
+    selected = []
+    while (selected.length < 12) {
+      let added = false
+      for (const key of CATEGORIES) {
+        const item = queues.get(key)?.shift()
+        if (item) {
+          selected.push(item)
+          added = true
+          if (selected.length >= 12) break
+        }
+      }
+      if (!added) break
+    }
+  } else {
+    selected = unique.slice(0, 10)
+  }
+
+  const anyFeedSucceeded = results.some((result) => result.status === "fulfilled")
+  return NextResponse.json({
+    success: anyFeedSucceeded && unique.length > 0,
+    category,
+    source: category === "platform" ? "Public GitHub Releases" : "Google News RSS and public GitHub Releases",
+    fetchedAt: new Date().toISOString(),
+    refreshIntervalSeconds: 120,
+    items: selected,
+    message: unique.length
+      ? undefined
+      : anyFeedSucceeded
+        ? "No recent published items were found for this category."
+        : "News providers are temporarily unavailable. No headlines have been fabricated.",
+  }, {
+    status: anyFeedSucceeded ? 200 : 503,
+    headers: { "Cache-Control": "public, s-maxage=120, stale-while-revalidate=300" },
+  })
+}

@@ -2,25 +2,28 @@ import type React from "react"
 import type { Metadata, Viewport } from "next"
 import { Analytics } from "@vercel/analytics/next"
 import { SpeedInsights } from "@vercel/speed-insights/next"
+import { IntegrationScripts } from "@/components/integration-scripts"
 import "./globals.css"
 
+const tidioPublicKey = process.env.NEXT_PUBLIC_TIDIO_PUBLIC_KEY?.trim()
+
 export const metadata: Metadata = {
-  title: "WHALEZ-AI | AI-Driven Financial Intelligence",
+  title: "WHALEZ-AI Ecosystem | DeltaAlpha-TradePro",
   description:
-    "Advanced AI-driven financial intelligence ecosystem. Quantitative analysis, market insights, and systematic strategy development.",
-  generator: "v0.app",
+    "Whalez-AI ecosystem gateway for trading intelligence, communications, banking, settlement, and founder-controlled public beta surfaces.",
+  generator: "Whalez-AI",
   icons: {
     icon: [
       {
-        url: "/icon-light-32x32.png",
-        media: "(prefers-color-scheme: light)",
-      },
-      {
-        url: "/icon-dark-32x32.png",
-        media: "(prefers-color-scheme: dark)",
-      },
-      {
         url: "/icon.svg",
+        type: "image/svg+xml",
+      },
+      {
+        url: "/whalezchain-icon.svg",
+        type: "image/svg+xml",
+      },
+      {
+        url: "/deltaalpha-icon.svg",
         type: "image/svg+xml",
       },
     ],
@@ -44,8 +47,16 @@ export default function RootLayout({
     <html lang="en" className="bg-background">
       <body className="font-sans antialiased">
         {children}
+        <IntegrationScripts />
         <Analytics />
         <SpeedInsights />
+        {tidioPublicKey ? (
+          <script
+            id="tidio-widget"
+            src={`https://code.tidio.co/${tidioPublicKey}.js`}
+            async
+          />
+        ) : null}
       </body>
     </html>
   )
